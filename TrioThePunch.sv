@@ -146,7 +146,7 @@ assign LED_USER  = 0;
 
 `include "build_id.v"
 localparam CONF_STR = {
-    "TrioThePunch;;",
+    "RA_TrioThePunch;;",
     "-;",
     "P1,Video;",
     "P1O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -338,6 +338,14 @@ wire [17:0] sdr_pf1_addr; wire sdr_pf1_cs; wire [31:0] sdr_pf1_data; wire sdr_pf
 wire [18:0] sdr_spr_addr; wire sdr_spr_cs; wire [31:0] sdr_spr_data; wire sdr_spr_ok;
 wire [17:0] sdr_oki_addr; wire sdr_oki_cs; wire  [7:0] sdr_oki_data; wire sdr_oki_ok;
 
+// RetroAchievements shadow write port (see RETROACHIEVEMENTS below)
+wire        ra_wr;
+wire [14:0] ra_word;
+wire [15:0] ra_din;
+wire  [1:0] ra_be;
+wire [10:0] ra_main_addr;
+wire [63:0] ra_main_q;
+
 actfancer_top u_game (
     .clk            (clk_sys),
     .clk_sdram      (clk_sys),
@@ -384,7 +392,14 @@ actfancer_top u_game (
     .dbg_dis_spr    (1'b0),
     .dbg_pf0        (12'd0),
     .dbg_pf1        (12'd0),
-    .dbg_spr        (12'd0)
+    .dbg_spr        (12'd0),
+
+    .ra_wr          (ra_wr),
+    .ra_word        (ra_word),
+    .ra_din         (ra_din),
+    .ra_be          (ra_be),
+    .ra_main_addr   (ra_main_addr),
+    .ra_main_q      (ra_main_q)
 );
 
 // ── Pause overlay: render_x/render_y counter derivati da hb/vb del core ─────
@@ -772,17 +787,24 @@ end
 assign sdr_pf1_data = pf1_ddr_data;
 assign sdr_pf1_ok   = pf1_ok_top;
 
+// The game's DDRAM master sits behind the RetroAchievements mirror's arbiter
+// (see RETROACHIEVEMENTS below).
+wire        game_DDRAM_BUSY, game_DDRAM_RD, game_DDRAM_WE;
+wire  [7:0] game_DDRAM_BURSTCNT, game_DDRAM_BE;
+wire [28:0] game_DDRAM_ADDR;
+wire [63:0] game_DDRAM_DIN;
+
 actfancer_ddram u_ddram (
     .DDRAM_CLK        (clk_sys),
-    .DDRAM_BUSY       (DDRAM_BUSY),
-    .DDRAM_BURSTCNT   (DDRAM_BURSTCNT),
-    .DDRAM_ADDR       (DDRAM_ADDR),
+    .DDRAM_BUSY       (game_DDRAM_BUSY),
+    .DDRAM_BURSTCNT   (game_DDRAM_BURSTCNT),
+    .DDRAM_ADDR       (game_DDRAM_ADDR),
     .DDRAM_DOUT       (DDRAM_DOUT),
     .DDRAM_DOUT_READY (DDRAM_DOUT_READY),
-    .DDRAM_RD         (DDRAM_RD),
-    .DDRAM_DIN        (DDRAM_DIN),
-    .DDRAM_BE         (DDRAM_BE),
-    .DDRAM_WE         (DDRAM_WE),
+    .DDRAM_RD         (game_DDRAM_RD),
+    .DDRAM_DIN        (game_DDRAM_DIN),
+    .DDRAM_BE         (game_DDRAM_BE),
+    .DDRAM_WE         (game_DDRAM_WE),
 
     .wraddr   (ddr_wraddr_r),
     .din      (ddr_din_r),
@@ -817,6 +839,69 @@ actfancer_ddram u_ddram (
 );
 
 assign DDRAM_CLK = clk_sys;
+
+//////////////////////////////////////////////////////////////////
+// RETROACHIEVEMENTS
+//////////////////////////////////////////////////////////////////
+// RAM mirror for the RetroAchievements fork of Main_MiSTer, laid out as
+// FinalBurn Neo's d_actfancr.cpp "All Ram" block for triothep (0xB042 bytes,
+// byte for byte; ARM region table: identity { 0x0000, 0xB042, 0x0000 }):
+//   0x0000-0x3FFF  Drv6280RAM, read through a second, 64-bit port of the main
+//                  RAM (triothep_main, rtl/ra/ra_ram8_rd64.sv)
+//   0x4000-0xB041  everything else (sound RAM, sprites, palette, sprite
+//                  buffer, latch, playfields, scroll, control), shadowed from
+//                  the CPU writes by rtl/ra/trio_ra_tap.sv into
+//                  rtl/ra/ra_shadow.v at RA offset - 0x4000
+// Once per frame, at the start of VBlank, rtl/ra/ra_mirror_gather.v (from
+// jotego's JTFRAME jtframe_ra_mirror.v) copies it to DDR3 at 0x3D000000 in
+// the "RACH" layout the RA build of Main_MiSTer reads. The DDRAM port is
+// shared with the game's ROM fetcher (actfancer_ddram) through ra_ddr_arb,
+// which only switches at transaction boundaries; the mirror releases the port
+// after every 256-byte burst.
+wire [11:0] ra_sh_rd;
+wire [63:0] ra_sh_q;
+ra_shadow #(.AW(15), .DEPTH(3600)) ra_shadow (
+    .clk_w(clk_sys), .wr(ra_wr && ra_word >= 15'h2000), .wr_word(ra_word[13:0] - 14'h2000),
+    .wr_din(ra_din), .wr_be(ra_be),
+    .clk_r(clk_sys), .rd_q(ra_sh_rd), .q(ra_sh_q)
+);
+
+// mirror read port: qword index; 0x000-0x7FF = main RAM, above = shadow.
+// Both answer one clock later; the mux adds a register (RD_LAT 2).
+wire [12:0] ra_rd_addr;
+wire [12:0] ra_sh_qw = ra_rd_addr - 13'h0800;
+assign ra_main_addr = ra_rd_addr[10:0];
+assign ra_sh_rd     = ra_sh_qw[11:0];
+reg         ra_sel_main;
+reg  [63:0] ra_q;
+always @(posedge clk_sys) begin
+    ra_sel_main <= ra_rd_addr < 13'h0800;
+    ra_q        <= ra_sel_main ? ra_main_q : ra_sh_q;
+end
+
+wire        ra_ddr_we, ra_ddr_busy;
+wire  [7:0] ra_ddr_burstcnt, ra_ddr_be;
+wire [28:0] ra_ddr_addr;
+wire [63:0] ra_ddr_din;
+ra_mirror_gather #(.DW(64), .RD_LAT(2), .BLOCKS(177)) ra_mirror (
+    .rst(~pll_locked), .clk(clk_sys),
+    .vblank(vb), .hold(ioctl_download),
+    .rd_en(), .rd_addr(ra_rd_addr), .rd_data(ra_q),
+    .ddr_we(ra_ddr_we), .ddr_busy(ra_ddr_busy), .ddr_burstcnt(ra_ddr_burstcnt),
+    .ddr_addr(ra_ddr_addr), .ddr_be(ra_ddr_be), .ddr_din(ra_ddr_din), .active()
+);
+
+ra_ddr_arb ra_arb (
+    .clk(clk_sys), .rst(~pll_locked),
+    .ddr_busy(DDRAM_BUSY), .ddr_dout_ready(DDRAM_DOUT_READY),
+    .c0_rd(game_DDRAM_RD), .c0_we(game_DDRAM_WE), .c0_addr(game_DDRAM_ADDR),
+    .c0_be(game_DDRAM_BE), .c0_din(game_DDRAM_DIN), .c0_burstcnt(game_DDRAM_BURSTCNT),
+    .c0_busy(game_DDRAM_BUSY),
+    .c1_we(ra_ddr_we), .c1_addr(ra_ddr_addr), .c1_be(ra_ddr_be), .c1_din(ra_ddr_din),
+    .c1_burstcnt(ra_ddr_burstcnt), .c1_busy(ra_ddr_busy),
+    .ddr_rd(DDRAM_RD), .ddr_we(DDRAM_WE), .ddr_addr(DDRAM_ADDR), .ddr_be(DDRAM_BE),
+    .ddr_din(DDRAM_DIN), .ddr_burstcnt(DDRAM_BURSTCNT)
+);
 
 //////////////////////////////////////////////////////////////////
 // Aspect Ratio + Scale (video_freak)

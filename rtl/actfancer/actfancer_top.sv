@@ -70,7 +70,16 @@ module actfancer_top
     input              dbg_dis_spr,
     input       [11:0] dbg_pf0,
     input       [11:0] dbg_pf1,
-    input       [11:0] dbg_spr
+    input       [11:0] dbg_spr,
+
+    // RetroAchievements shadow write port (rtl/ra/trio_ra_tap.sv)
+    output             ra_wr,
+    output      [14:0] ra_word,
+    output      [15:0] ra_din,
+    output       [1:0] ra_be,
+    // RetroAchievements: main RAM 64-bit read port (see triothep_main)
+    input       [10:0] ra_main_addr,
+    output      [63:0] ra_main_q
 );
 
 // ---------------------------------------------------------------
@@ -211,6 +220,12 @@ wire [7:0] p2 = ~joy2;
 // In actfancer_main il bit7 di sys_q viene mappato sul vbl, qui basta passare vbl.
 // (Coin/service handled by `coin` input outside this module — TODO future)
 
+// RetroAchievements tap wires (see trio_ra_tap below)
+wire        ra_m_wr, ra_s_wr;
+wire [20:0] ra_m_a;
+wire [10:0] ra_s_a;
+wire  [7:0] ra_m_d, ra_s_d;
+
 triothep_main u_main (
     .clk        (clk),
     .ce_h6280   (ce_h6280),
@@ -256,7 +271,14 @@ triothep_main u_main (
     .pal_cs     (pal_cs),
 
     .snd_latch    (snd_latch),
-    .snd_latch_we (snd_latch_we)
+    .snd_latch_we (snd_latch_we),
+
+    .ra_wr      (ra_m_wr),
+    .ra_a       (ra_m_a),
+    .ra_d       (ra_m_d),
+    .ra_clk     (clk),
+    .ra_rd_addr (ra_main_addr),
+    .ra_rd_q    (ra_main_q)
 );
 
 actfancer_snd u_snd (
@@ -285,7 +307,27 @@ actfancer_snd u_snd (
     .vol_oki    (vol_oki),
 
     .snd_l      (aud_l),
-    .snd_r      (aud_r)
+    .snd_r      (aud_r),
+
+    .ra_wr      (ra_s_wr),
+    .ra_a       (ra_s_a),
+    .ra_d       (ra_s_d)
+);
+
+// RetroAchievements: FBNeo "All Ram" layout of the CPU writes
+trio_ra_tap u_ra_tap (
+    .clk        (clk),
+    .m_wr       (ra_m_wr),
+    .m_a        (ra_m_a),
+    .m_d        (ra_m_d),
+    .spr_buffer (spr_buffer),
+    .s_wr       (ra_s_wr),
+    .s_a        (ra_s_a),
+    .s_d        (ra_s_d),
+    .ra_wr      (ra_wr),
+    .ra_word    (ra_word),
+    .ra_din     (ra_din),
+    .ra_be      (ra_be)
 );
 
 wire [11:0] vid_rgb;

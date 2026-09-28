@@ -80,7 +80,18 @@ module triothep_main
 
     // Sound latch out
     output       [7:0] snd_latch,
-    output             snd_latch_we
+    output             snd_latch_we,
+
+    // RetroAchievements tap: CPU writes (level strobe, physical address)
+    output             ra_wr,
+    output      [20:0] ra_a,
+    output       [7:0] ra_d,
+
+    // RetroAchievements: 64-bit read port of the main RAM (qword index,
+    // byte 8n in bits 7:0, data one ra_clk later)
+    input              ra_clk,
+    input       [10:0] ra_rd_addr,
+    output      [63:0] ra_rd_q
 );
 
 // ---------------------------------------------------------------
@@ -130,13 +141,21 @@ wire cs_ram    = cpu_a[20] == 1'b1 && cpu_a[19:14] == 6'b111100;
 // ---------------------------------------------------------------
 // Main RAM 16KB (BRAM read-always)
 // ---------------------------------------------------------------
-reg [7:0] main_ram[0:16383] /* synthesis ramstyle = "M10K, no_rw_check" */;
-reg [7:0] ram_q;
+// RetroAchievements fork: explicit dual-port M10K (rtl/ra/ra_ram8_rd64.sv)
+// so a second, read-only 64-bit port can serve the RA RAM mirror. Port A
+// keeps the original timing (registered address, data one clock later).
+wire [7:0] ram_q;
 wire ram_we = cs_ram && ~cpu_wrn;
-always @(posedge clk) begin
-    if (ram_we) main_ram[cpu_a[13:0]] <= cpu_do;
-    ram_q <= main_ram[cpu_a[13:0]];
-end
+ra_ram8_rd64 #(.WIDTHAD(14)) main_ram (
+    .clock    (clk),
+    .we       (ram_we),
+    .address  (cpu_a[13:0]),
+    .data     (cpu_do),
+    .q        (ram_q),
+    .clock_b  (ra_clk),
+    .address_b(ra_rd_addr),
+    .q_b      (ra_rd_q)
+);
 
 // ---------------------------------------------------------------
 // K-port input mux (Trio-specific): cpu_o seleziona quale input restituire.
@@ -211,6 +230,10 @@ always @(posedge clk) begin
     if (snd_latch_we_w) snd_latch_r <= cpu_do;
 end
 assign snd_latch     = snd_latch_r;
+
+assign ra_wr = ~cpu_wrn;
+assign ra_a  = cpu_a;
+assign ra_d  = cpu_do;
 assign snd_latch_we  = snd_latch_we_w;
 
 // VBL → IRQ1 (HOLD_LINE equivalente)

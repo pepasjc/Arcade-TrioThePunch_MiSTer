@@ -47,7 +47,12 @@ module actfancer_snd
 
     // Combined mono audio
     output signed [15:0] snd_l,
-    output signed [15:0] snd_r
+    output signed [15:0] snd_r,
+
+    // RetroAchievements tap: sound RAM writes (single-clock strobe)
+    output             ra_wr,
+    output      [10:0] ra_a,
+    output       [7:0] ra_d
 );
 
 // ---------------------------------------------------------------
@@ -91,6 +96,9 @@ end
 reg [7:0] snd_ram[0:2047] /* synthesis ramstyle = "M10K, no_rw_check" */;
 reg [7:0] ram_q;
 wire snd_ram_we = cs_ram & ~cpu_rw & ce_m6502;
+assign ra_wr = snd_ram_we;
+assign ra_a  = cpu_ab[10:0];
+assign ra_d  = cpu_do;
 always @(posedge clk) begin
     if (snd_ram_we) snd_ram[cpu_ab[10:0]] <= cpu_do;
     ram_q <= snd_ram[cpu_ab[10:0]];   // always read so ram_q tracks cpu_ab
